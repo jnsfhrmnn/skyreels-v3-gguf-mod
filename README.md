@@ -40,6 +40,17 @@ Tested on **RTX 5090 32GB**, Windows 11, PyTorch 2.8.0+cu128, 8 inference steps.
 
 > Q6_K at 720P requires more than 32GB VRAM with block offloading.
 
+### Sample Outputs
+
+All samples generated with prompt: *"A cat walking slowly across a garden"*, seed 42, 8 steps.
+
+| Sample | Settings |
+|--------|----------|
+| [480P Q4_K_M](samples/480p_Q4_K_M_v2v.mp4) | 480P, Q4_K_M, 5s, v2v — **2:22 total** |
+| [480P Q6_K](samples/480p_Q6_K_v2v.mp4) | 480P, Q6_K, 5s, v2v — **2:19 total** |
+| [480P Q8_0](samples/480p_Q8_0_v2v.mp4) | 480P, Q8_0, 5s, v2v — **6:06 total** |
+| [720P Q4_K_M](samples/720p_Q4_K_M_low_vram_v2v.mp4) | 720P, Q4_K_M + low_vram, 5s, v2v — **12:23 total** |
+
 ### Key Findings
 - **Q4_K_M and Q6_K deliver nearly identical speed** at 480P despite different sizes
 - At 480P, the bottleneck shifts from memory bandwidth to compute
