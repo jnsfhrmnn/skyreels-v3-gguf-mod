@@ -702,6 +702,7 @@ class ReferenceToVideoPipeline:
         use_usp=False,
         offload=False,
         low_vram=False,
+        gguf_path=None,
     ):
         """
         Initialize the reference to video pipeline class
@@ -713,8 +714,11 @@ class ReferenceToVideoPipeline:
             use_usp: Whether to use USP, defaults to False
             offload: Whether to offload the model to CPU, defaults to False
             low_vram: Whether to use low VRAM mode, defaults to False
+            gguf_path: Path to GGUF quantized model file
         """
         offload = offload or low_vram
+        if gguf_path:
+            offload = True  # GGUF: offload other models to free VRAM for transformer
         load_device = "cpu" if offload else device
         self.transformer = SkyReelsA2WanI2v3DModel.from_pretrained(
             model_path, subfolder="transformer", torch_dtype=torch.bfloat16
@@ -740,8 +744,16 @@ class ReferenceToVideoPipeline:
         self.use_usp = use_usp
         self.offload = offload
         self.low_vram = low_vram
+        self.gguf_path = gguf_path
+        self.gguf_active = bool(gguf_path)
         self.device = device
-        if low_vram:
+        if gguf_path:
+            from ..modules.gguf_loader import load_gguf_into_model
+            # GGUF + low_vram: load to CPU for block offloading; otherwise load to CUDA
+            gguf_device = "cpu" if low_vram else device
+            logging.info(f"Loading GGUF weights into R2V transformer from {gguf_path}")
+            load_gguf_into_model(self.pipeline.transformer, gguf_path, device=gguf_device)
+        elif low_vram:
             from torchao.quantization import float8_weight_only
             from torchao.quantization import quantize_
             quantize_(self.pipeline.transformer, float8_weight_only(), device="cuda")
@@ -756,7 +768,15 @@ class ReferenceToVideoPipeline:
 
             parallelize_transformer(self.pipeline)
 
-        if self.offload:
+        if self.gguf_active:
+            # GGUF: VAE/TE on CPU, transformer managed separately
+            self.pipeline.vae.to("cpu")
+            self.pipeline.text_encoder.to("cpu")
+            if not low_vram:
+                # Transformer already on CUDA via GGUF load
+                pass
+            # low_vram: transformer on CPU, block_offload will handle it
+        elif self.offload:
             self.pipeline.vae.to(device)
             self.pipeline.transformer.to("cpu")
             self.pipeline.text_encoder.to("cpu")
@@ -789,8 +809,12 @@ class ReferenceToVideoPipeline:
             "block_offload": self.low_vram,
         }
         logging.info(f"kwargs: {kwargs}")
+        # GGUF: bring VAE to GPU for encode/decode, then offload
+        if self.gguf_active:
+            self.pipeline.vae.to(self.device)
         video_pt = self.pipeline(**kwargs).frames
-
+        if self.gguf_active:
+            self.pipeline.vae.to("cpu")
         gc.collect()
         torch.cuda.empty_cache()
 

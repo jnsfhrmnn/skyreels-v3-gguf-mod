@@ -90,8 +90,19 @@ class TalkingAvatarPipeline:
         cls,
         checkpoint_dir: str,
         quant: bool = False,
+        gguf_path: str = None,
     ) -> Dict[str, WanModel]:
         print(f"load dit model from: {checkpoint_dir}")
+
+        if gguf_path:
+            from ..modules.gguf_loader import load_gguf_into_model
+            logging.info(f"Loading GGUF model from {gguf_path}")
+            with torch.device("meta"):
+                model = WanModel.from_config(os.path.join(checkpoint_dir, "config.json")).to(torch.bfloat16)
+            model = load_gguf_into_model(model, gguf_path, device="cuda")
+            model.eval().requires_grad_(False)
+            return {"model": model}
+
         state_dict = {}
         with torch.device("cpu"):
             for file in os.listdir(checkpoint_dir):
@@ -123,8 +134,11 @@ class TalkingAvatarPipeline:
         use_timestep_transform=True,
         offload=False,
         low_vram=False,
+        gguf_path=None,
     ):
         offload = offload or low_vram
+        if gguf_path:
+            offload = False
         quant = low_vram
 
         self.device = torch.device(f"cuda:{device_id}")
@@ -164,6 +178,7 @@ class TalkingAvatarPipeline:
         self.model = self.init_dit_model(
             checkpoint_dir=model_path,
             quant=quant,
+            gguf_path=gguf_path,
         )["model"]
 
         if use_usp:

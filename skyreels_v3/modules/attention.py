@@ -15,7 +15,18 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
+try:
+    from sageattention import sageattn
+
+    SAGE_ATTN_AVAILABLE = True
+except (ModuleNotFoundError, ImportError):
+    SAGE_ATTN_AVAILABLE = False
+
+import logging
+_attn_backend_logged = False
 import warnings
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "flash_attention",
@@ -152,6 +163,16 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
+    global _attn_backend_logged
+    if not _attn_backend_logged:
+        if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
+            logger.info("Attention backend: FlashAttention")
+        elif SAGE_ATTN_AVAILABLE:
+            logger.info("Attention backend: SageAttention 2.x")
+        else:
+            logger.info("Attention backend: PyTorch SDPA (slowest)")
+        _attn_backend_logged = True
+
     if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
         return flash_attention(
             q=q,
@@ -168,6 +189,25 @@ def attention(
             dtype=dtype,
             version=fa_version,
         )
+    elif SAGE_ATTN_AVAILABLE:
+        if q_lens is not None or k_lens is not None:
+            warnings.warn(
+                "Padding mask is disabled when using SageAttention. "
+                "It can have a significant impact on performance."
+            )
+
+        if q_scale is not None:
+            q = q * q_scale
+
+        # sageattn expects [B, H, L, D] — input is [B, L, H, D]
+        q = q.transpose(1, 2).to(dtype)
+        k = k.transpose(1, 2).to(dtype)
+        v = v.transpose(1, 2).to(dtype)
+
+        out = sageattn(q, k, v, is_causal=causal, scale=softmax_scale)
+
+        out = out.transpose(1, 2).contiguous()
+        return out
     else:
         if q_lens is not None or k_lens is not None:
             warnings.warn(

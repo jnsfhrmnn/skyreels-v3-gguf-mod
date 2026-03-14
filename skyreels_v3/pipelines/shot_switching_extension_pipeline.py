@@ -27,6 +27,7 @@ class ShotSwitchingExtensionPipeline:
         use_usp=False,
         offload=False,
         low_vram=False,
+        gguf_path=None,
     ):
         """
         Initialize the diffusion forcing pipeline class
@@ -35,15 +36,19 @@ class ShotSwitchingExtensionPipeline:
             model_path (str): Path to the model
             device (str): Device to run on, defaults to 'cuda'
             weight_dtype: Weight data type, defaults to torch.bfloat16
+            gguf_path: Path to GGUF quantized model file
         """
         offload = offload or low_vram
+        if gguf_path:
+            offload = True  # GGUF: offload T5/VAE to free VRAM for transformer
         load_device = "cpu" if offload else device
         self.transformer = get_transformer(
             model_path,
             subfolder="shot_transformer",
-            device=load_device,
+            device=device if gguf_path else load_device,
             weight_dtype=weight_dtype,
             low_vram=low_vram,
+            gguf_path=gguf_path,
         )
         vae_model_path = os.path.join(model_path, "Wan2.1_VAE.pth")
         self.vae = get_vae(vae_model_path, device=device, weight_dtype=torch.float32)
@@ -84,10 +89,12 @@ class ShotSwitchingExtensionPipeline:
             "transformer": self.transformer,
         }
         self.offload = offload
+        self.gguf_active = bool(gguf_path)
         self.vae.to(self.device)
         if self.offload:
             self.text_encoder.to("cpu")
-            self.transformer.to("cpu")
+            if not self.gguf_active:
+                self.transformer.to("cpu")
         else:
             self.text_encoder.to(self.device)
             self.transformer.to(self.device)
@@ -185,7 +192,9 @@ class ShotSwitchingExtensionPipeline:
         context_frames = prefix_video.shape[2]
         total_frames = latents[0].shape[1] + context_frames
 
-        if self.offload and not block_offload:
+        if self.gguf_active:
+            pass  # GGUF: transformer stays on CUDA permanently
+        elif self.offload and not block_offload:
             self.transformer.to(self.device)
         else:
             self.transformer.to("cpu")
@@ -232,7 +241,7 @@ class ShotSwitchingExtensionPipeline:
                 if block_offload:
                     gc.collect()
                     torch.cuda.empty_cache()
-            if self.offload:
+            if self.offload and not self.gguf_active:
                 self.transformer.cpu()
                 torch.cuda.empty_cache()
             videos = self.vae.decode(latents[0])

@@ -164,7 +164,7 @@ if __name__ == "__main__":
         "--resolution",
         type=str,
         default="720P",
-        choices=["480P", "540P", "720P"],
+        choices=["480P", "540P", "720P", "1080P"],
         help="Output video resolution. Lower resolution (540P/480P) recommended for low VRAM GPUs.",
     )
     parser.add_argument(
@@ -191,6 +191,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable low VRAM mode with FP8 weight-only quantization and block offload. "
         "Recommended for GPUs with <24GB VRAM. Cannot be used with --use_usp.",
+    )
+    parser.add_argument(
+        "--gguf",
+        type=str,
+        default=None,
+        help="Path to a GGUF quantized model file (e.g. Q8_0). "
+        "Loads weights from GGUF and keeps model in VRAM without block offloading. "
+        "Requires 'pip install gguf'. Cannot be used with --low_vram or --offload.",
     )
 
     # ==================== Video Extension Parameters ====================
@@ -252,6 +260,9 @@ if __name__ == "__main__":
         )
     device = f"cuda:{local_rank}"
     assert not(args.use_usp and args.low_vram), "usp mode and low_vram mode cannot be used together"
+    if args.gguf:
+        assert not args.offload, "--gguf cannot be used with --offload"
+        assert os.path.isfile(args.gguf), f"GGUF file not found: {args.gguf}"
 
     # In multi-process inference, only rank0 downloads the model; other ranks receive the resolved path via broadcast.
     if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
@@ -279,13 +290,13 @@ if __name__ == "__main__":
 
     # init pipeline
     if args.task_type == "single_shot_extension":
-        pipe = SingleShotExtensionPipeline(model_path=args.model_id, use_usp=args.use_usp, offload=args.offload, low_vram=args.low_vram)
+        pipe = SingleShotExtensionPipeline(model_path=args.model_id, use_usp=args.use_usp, offload=args.offload, low_vram=args.low_vram, gguf_path=args.gguf)
         video_out = pipe.extend_video(args.input_video, args.prompt, args.duration, args.seed, resolution=args.resolution)
     elif args.task_type == "shot_switching_extension":
-        pipe = ShotSwitchingExtensionPipeline(model_path=args.model_id, use_usp=args.use_usp, offload=args.offload, low_vram=args.low_vram)
+        pipe = ShotSwitchingExtensionPipeline(model_path=args.model_id, use_usp=args.use_usp, offload=args.offload, low_vram=args.low_vram, gguf_path=args.gguf)
         video_out = pipe.extend_video(args.input_video, args.prompt, args.duration, args.seed, resolution=args.resolution)
     elif args.task_type == "reference_to_video":
-        pipe = ReferenceToVideoPipeline(model_path=args.model_id, use_usp=args.use_usp, offload=args.offload, low_vram=args.low_vram)
+        pipe = ReferenceToVideoPipeline(model_path=args.model_id, use_usp=args.use_usp, offload=args.offload, low_vram=args.low_vram, gguf_path=args.gguf)
         video_out = pipe.generate_video(args.ref_imgs, args.prompt, args.duration, args.seed, resolution=args.resolution)
     elif args.task_type == "talking_avatar":
         config = WAN_CONFIGS["talking-avatar-19B"]
@@ -297,6 +308,7 @@ if __name__ == "__main__":
             use_usp=args.use_usp,
             offload=args.offload,
             low_vram=args.low_vram,
+            gguf_path=args.gguf,
         )
         input_data = {
             "prompt": args.prompt,

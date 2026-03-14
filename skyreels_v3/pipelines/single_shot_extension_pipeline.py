@@ -36,6 +36,7 @@ class SingleShotExtensionPipeline:
         use_usp=False,
         offload=False,
         low_vram=False,
+        gguf_path=None,
     ):
         """
         Initialize the diffusion forcing pipeline class
@@ -44,20 +45,26 @@ class SingleShotExtensionPipeline:
             model_path (str): Path to the model
             device (str): Device to run on, defaults to 'cuda'
             weight_dtype: Weight data type, defaults to torch.bfloat16
+            gguf_path: Path to GGUF quantized model file
         """
         offload = offload or low_vram
+        if gguf_path:
+            offload = True  # GGUF: offload T5/VAE to free VRAM for transformer
         load_device = "cpu" if offload else device
+        # GGUF: load to CUDA if not low_vram, else load to CPU for block offloading
+        gguf_device = "cpu" if (gguf_path and low_vram) else (device if gguf_path else load_device)
         self.transformer = get_transformer(
             model_path,
             subfolder="transformer",
-            device=load_device,
+            device=gguf_device,
             weight_dtype=weight_dtype,
-            low_vram=low_vram,
+            low_vram=low_vram if not gguf_path else False,  # GGUF provides own quantization
+            gguf_path=gguf_path,
         )
         vae_model_path = os.path.join(model_path, "Wan2.1_VAE.pth")
         self.vae = get_vae(vae_model_path, device=device, weight_dtype=torch.float32)
         self.text_encoder = get_text_encoder(
-            model_path, device=load_device, weight_dtype=weight_dtype
+            model_path, device="cpu" if gguf_path else load_device, weight_dtype=weight_dtype
         )
         self.video_processor = VideoProcessor(vae_scale_factor=16)
         self.device = device
@@ -89,11 +96,20 @@ class SingleShotExtensionPipeline:
         self.vae_stride = (4, 8, 8)
         self.patch_size = (1, 2, 2)
         self.offload = offload
-        self.vae.to(self.device)
-        if self.offload:
+        self.gguf_active = bool(gguf_path)
+        if self.gguf_active:
+            # GGUF: everything except transformer on CPU
+            self.vae.to("cpu")
+            self.text_encoder.to("cpu")
+            if self.low_vram:
+                # GGUF + low_vram: transformer on CPU too, will be block-offloaded
+                self.transformer.to("cpu")
+        elif self.offload:
+            self.vae.to(self.device)
             self.text_encoder.to("cpu")
             self.transformer.to("cpu")
         else:
+            self.vae.to(self.device)
             self.text_encoder.to(self.device)
             self.transformer.to(self.device)
 
@@ -123,7 +139,13 @@ class SingleShotExtensionPipeline:
         padding_frames = 0
         for i, gen_time in enumerate(generatetime_list):
             latent_num_frames = factor_num_frames * gen_time
+            # GGUF: bring VAE to GPU for encoding, then offload
+            if self.gguf_active:
+                self.vae.to(self.device)
             prefix_video = self.vae.encode(prefix_video)
+            if self.gguf_active:
+                self.vae.to("cpu")
+                torch.cuda.empty_cache()
             prefix_shape = prefix_video.shape[2]
             rest_frames = (latent_num_frames + prefix_shape) % 8
             if rest_frames > padding_frames:
@@ -181,7 +203,8 @@ class SingleShotExtensionPipeline:
         **kwargs,
     ):
         self._guidance_scale = guidance_scale
-        self.vae.to(self.device)
+        if not self.gguf_active:
+            self.vae.to(self.device)
         if self.offload:
             self.text_encoder.to(self.device)
         # preprocess
@@ -226,7 +249,7 @@ class SingleShotExtensionPipeline:
             )
         ]
 
-        if self.offload and not block_offload:
+        if self.offload and not block_offload and not self.gguf_active:
             self.transformer.to(self.device)
 
         logging.info(f"start transformer forward, latents: {latents[0].shape}")
@@ -280,15 +303,21 @@ class SingleShotExtensionPipeline:
             logging.info(
                 f"finish transformer forward, latents: {latents[0].shape}, {latents[0].device}"
             )
-            if self.offload:
+            if self.offload and not self.gguf_active:
                 self.transformer.cpu()
                 torch.cuda.empty_cache()
+            # GGUF: bring VAE to GPU for decode
+            if self.gguf_active:
+                self.vae.to(self.device)
             if "condition" in kwargs:
                 videos = self.vae.decode(
                     torch.cat([kwargs["condition"], latents[0].unsqueeze(0)], 2)[0]
                 )
             else:
                 videos = self.vae.decode(latents[0])
+            if self.gguf_active:
+                self.vae.to("cpu")
+                torch.cuda.empty_cache()
             logging.info(f"finish vae decode, videos: {videos.shape}, {videos.device}")
             videos = (videos / 2 + 0.5).clamp(0, 1)
             videos = [video for video in videos]

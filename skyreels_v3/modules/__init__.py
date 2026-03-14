@@ -30,11 +30,26 @@ def get_vae(model_path, subfolder="", device="cuda", weight_dtype=torch.float32)
 
 
 def get_transformer(
-    model_path, subfolder="", device="cuda", weight_dtype=torch.bfloat16, low_vram=False
+    model_path, subfolder="", device="cuda", weight_dtype=torch.bfloat16, low_vram=False,
+    gguf_path=None,
 ) -> WanModel:
     model_path = os.path.join(model_path, subfolder) if subfolder else model_path
     config_path = os.path.join(model_path, "config.json")
     logging.info(f"loading transformer from {config_path}, model_path: {model_path}")
+
+    if gguf_path:
+        from .gguf_loader import load_gguf_into_model
+        logging.info(f"Loading GGUF model from {gguf_path}")
+        # Create model skeleton on meta device to avoid RAM spike
+        with torch.device("meta"):
+            transformer = WanModel.from_config(config_path).to(weight_dtype)
+        transformer = load_gguf_into_model(transformer, gguf_path, device=device)
+        transformer.requires_grad_(False)
+        transformer.eval()
+        gc.collect()
+        torch.cuda.empty_cache()
+        return transformer
+
     transformer = WanModel.from_config(config_path).to(weight_dtype).to(device)
 
     for file in os.listdir(model_path):
